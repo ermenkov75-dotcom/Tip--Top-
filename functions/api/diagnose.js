@@ -1,108 +1,96 @@
-export async function onRequestPost({ request, env }) {
-  const json = (data, status = 200) =>
-    new Response(JSON.stringify(data), {
-      status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      },
-    });
+const MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 
-  if (!env.OPENAI_API_KEY) {
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    }
+  });
+}
+
+export async function onRequestPost({ request, env }) {
+  if (!env.AI || typeof env.AI.run !== "function") {
     return json({
       error: "AI_NOT_CONFIGURED",
-      message: "La diagnosi AI non è ancora configurata sul server.",
+      message: "Il collegamento AI di Cloudflare non è ancora attivo nelle impostazioni del progetto."
     }, 503);
   }
 
   let body;
   try {
-    body = await request.json();
+    const raw = await request.text();
+    if (raw.length > 6_000_000) {
+      return json({ error: "REQUEST_TOO_LARGE", message: "La richiesta è troppo grande. Scegli una foto più piccola." }, 413);
+    }
+    body = JSON.parse(raw);
   } catch {
     return json({ error: "INVALID_JSON", message: "Richiesta non valida." }, 400);
   }
 
-  const category = String(body.category || "").slice(0, 80);
+  const category = typeof body.category === "string" ? body.category.trim().slice(0, 100) : "";
   const mode = body.mode === "pro" ? "professionista" : "principiante";
-  const problem = String(body.problem || "").trim().slice(0, 5000);
+  const problem = typeof body.problem === "string" ? body.problem.trim().slice(0, 5000) : "";
   const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : "";
 
-  if (!problem && !imageDataUrl) {
-    return json({ error: "MISSING_INPUT", message: "Descrivi il problema oppure carica una foto." }, 400);
+  if (!category || (!problem && !imageDataUrl)) {
+    return json({ error: "MISSING_INPUT", message: "Scegli il settore e descrivi il problema oppure carica una foto." }, 400);
   }
 
-  const content = [{
-    type: "input_text",
-    text: `Sei TIP-TOP, assistente per la diagnosi tecnica preliminare. Settore scelto: ${category || "non specificato"}. Livello: ${mode}.
-Descrizione dell'utente: ${problem || "Nessuna descrizione: valuta soltanto ciò che è chiaramente visibile nella foto."}
-
-Rispondi in italiano, in modo strutturato e prudente, usando queste sezioni:
-1. Sintesi del sintomo (distingui fatti osservati e ipotesi)
-2. Cause possibili ordinate per probabilità, spiegando l'incertezza
-3. Controlli sicuri, passo per passo, adatti al livello selezionato
-4. Cosa osservare e quali informazioni raccogliere
-5. Quando fermarsi e chiamare un tecnico
-6. Domande mirate per restringere le cause
-
-Non inventare codici, misure, componenti o dettagli non forniti. Non dichiarare una diagnosi certa da una sola foto. Per elettricità, macchinari, gas, pressione, refrigeranti o altri rischi, non guidare persone non qualificate in operazioni pericolose: raccomanda isolamento delle energie e un professionista qualificato. Se l'immagine non consente di identificare il problema, dillo chiaramente.`
-  }];
-
-  if (imageDataUrl) {
-    const match = imageDataUrl.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
-    if (!match) {
-      return json({ error: "INVALID_IMAGE", message: "Formato immagine non supportato. Usa JPG, PNG o WEBP." }, 400);
-    }
-    if (imageDataUrl.length > 5_500_000) {
-      return json({ error: "IMAGE_TOO_LARGE", message: "La foto è troppo grande. Scegli un'immagine più piccola." }, 413);
-    }
-    content.push({ type: "input_image", image_url: imageDataUrl, detail: "auto" });
+  if (imageDataUrl && !/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(imageDataUrl)) {
+    return json({ error: "INVALID_IMAGE", message: "Formato immagine non supportato. Usa JPG, PNG o WEBP." }, 400);
+  }
+  if (imageDataUrl.length > 5_600_000) {
+    return json({ error: "IMAGE_TOO_LARGE", message: "La foto è troppo grande. Scegli un'immagine più piccola." }, 413);
   }
 
-  let upstream;
+  const system = [
+    "Sei TIP-TOP, un assistente per la diagnosi tecnica preliminare.",
+    "Rispondi sempre in italiano, in modo chiaro, concreto e prudente.",
+    "Distingui fatti osservati, ipotesi e verifiche. Non inventare dettagli, misure, codici o componenti e non dichiarare una diagnosi certa se i dati non bastano.",
+    "Organizza la risposta in: 1) sintesi del problema, 2) cause possibili ordinate per probabilità e motivazione, 3) controlli sicuri passo per passo, 4) cosa osservare e come interpretarlo, 5) quando fermarsi e chiamare un tecnico, 6) fino a tre domande mirate se servono.",
+    "Se è presente una foto, descrivi soltanto ciò che è chiaramente visibile. Se non basta, dillo e chiedi una foto più chiara o informazioni pertinenti.",
+    "Per elettricità, gas, refrigeranti, pressione, macchinari in movimento o altri rischi, metti prima la sicurezza. Non guidare un principiante in lavori sotto tensione, bypass di protezioni o operazioni pericolose; raccomanda un tecnico qualificato quando necessario.",
+    "Modalità professionista: puoi usare terminologia tecnica, ma non inventare valori o procedure specifiche senza dati sufficienti."
+  ].join(" ");
+
+  const userText = [
+    "Settore: " + category,
+    "Livello: " + mode,
+    "Descrizione: " + (problem || "L'utente non ha scritto una descrizione. Analizza solo ciò che è realmente visibile nella foto."),
+    "Fornisci controlli specifici per questo caso, non una lista generica."
+  ].join("\n");
+
+  const userContent = imageDataUrl
+    ? [
+        { type: "text", text: userText },
+        { type: "image_url", image_url: { url: imageDataUrl } }
+      ]
+    : userText;
+
   try {
-    upstream = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: env.OPENAI_MODEL || "gpt-4.1-mini",
-        input: [{ role: "user", content }],
-        max_output_tokens: 1200,
-      }),
+    const result = await env.AI.run(MODEL, {
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userContent }
+      ],
+      max_tokens: 900,
+      temperature: 0.2
     });
+
+    const answer = typeof result?.response === "string"
+      ? result.response.trim()
+      : typeof result?.result === "string"
+        ? result.result.trim()
+        : "";
+
+    if (!answer) {
+      return json({ error: "AI_EMPTY_RESPONSE", message: "L'AI non ha restituito una risposta leggibile. Riprova." }, 502);
+    }
+    return json({ answer });
   } catch {
-    return json({ error: "AI_UNAVAILABLE", message: "Servizio AI non raggiungibile. Riprova più tardi." }, 502);
+    return json({ error: "AI_REQUEST_FAILED", message: "Il servizio AI non è riuscito a completare l'analisi. Riprova più tardi." }, 502);
   }
-
-  if (!upstream.ok) {
-    // Never return upstream details or credentials to the browser.
-    return json({
-      error: "AI_REQUEST_FAILED",
-      message: upstream.status === 401
-        ? "La configurazione AI del server non è valida."
-        : "La diagnosi AI non è riuscita. Riprova più tardi.",
-    }, 502);
-  }
-
-  let result;
-  try {
-    result = await upstream.json();
-  } catch {
-    return json({ error: "AI_BAD_RESPONSE", message: "Risposta AI non valida." }, 502);
-  }
-
-  const answer = (result.output || [])
-    .flatMap(item => item.content || [])
-    .filter(item => item.type === "output_text")
-    .map(item => item.text)
-    .join("\n")
-    .trim();
-
-  if (!answer) {
-    return json({ error: "AI_EMPTY_RESPONSE", message: "Non è stato possibile generare una risposta utile." }, 502);
-  }
-
-  return json({ answer });
 }
