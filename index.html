@@ -116,15 +116,15 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
       <img id="preview" alt="Anteprima della foto selezionata">
     </div>
     <button class="primary" id="diagnose">Inizia la diagnosi →</button>
-    <p class="note">Prototipo dimostrativo: la diagnosi reale con intelligenza artificiale e l'analisi delle immagini non sono ancora collegate.</p>
+    <p class="note">La diagnosi AI richiede che il servizio server sia attivato. Non inserire dati personali o immagini sensibili.</p>
   </section>
 
   <section class="panel result" id="result" aria-live="polite">
-    <span class="pill">ESEMPIO DIMOSTRATIVO</span>
+    <span class="pill" id="resultBadge">DIAGNOSI</span>
     <h2 id="resultTitle">Primi controlli consigliati</h2>
     <p id="resultIntro"></p>
-    <h3>Possibili verifiche</h3>
-    <ol id="steps"></ol>
+    <div id="aiAnswer" style="white-space:pre-wrap;line-height:1.65;overflow-wrap:anywhere"></div>
+    <div id="fallbackSteps" hidden><h3>Possibili verifiche</h3><ol id="steps"></ol></div>
     <div class="warning"><strong>⚠️ Sicurezza prima di tutto.</strong><br>
       Non intervenire su circuiti elettrici sotto tensione o macchinari in movimento.
       Se non sei qualificato, rivolgiti a un tecnico.
@@ -172,47 +172,81 @@ document.getElementById("photo").addEventListener("change", event => {
   preview.style.display = "block";
 });
 
-document.getElementById("diagnose").addEventListener("click", () => {
+document.getElementById("diagnose").addEventListener("click", async () => {
+  const button = document.getElementById("diagnose");
   const problem = document.getElementById("problem").value.trim();
   const photo = document.getElementById("photo").files[0];
   const result = document.getElementById("result");
-  const steps = document.getElementById("steps");
+  const answerBox = document.getElementById("aiAnswer");
+  const badge = document.getElementById("resultBadge");
 
   if (!problem && !photo) {
     alert("Scrivi il problema oppure seleziona una foto.");
     return;
   }
 
-  document.getElementById("resultTitle").textContent =
-    "Primi controlli — " + selectedCategory;
-  document.getElementById("resultIntro").textContent =
-    "Hai selezionato " + selectedCategory + " e la modalità " +
-    (selectedMode === "beginner" ? "Principiante" : "Professionista") +
-    ". Questa versione mostra un esempio di flusso, non analizza ancora realmente il guasto.";
-
-  const beginnerSteps = [
-    "Metti in sicurezza l'area e non toccare parti pericolose.",
-    "Osserva quando compare il problema e se ci sono rumori, odori o perdite.",
-    "Controlla solo gli elementi esterni accessibili senza smontare nulla.",
-    "Annota eventuali messaggi di errore o indicatori visibili.",
-    "Se il problema persiste, raccogli le informazioni per un tecnico qualificato."
-  ];
-  const proSteps = [
-    "Documenta il sintomo, le condizioni operative e gli eventuali codici di errore.",
-    "Consulta lo schema e la documentazione tecnica del modello specifico.",
-    "Definisci misure e verifiche in base alla procedura del costruttore.",
-    "Isola le energie e applica le procedure di sicurezza prima di intervenire.",
-    "Registra i risultati delle verifiche prima di formulare una diagnosi."
-  ];
-
-  steps.replaceChildren();
-  (selectedMode === "beginner" ? beginnerSteps : proSteps).forEach(item => {
-    const li = document.createElement("li");
-    li.textContent = item;
-    steps.appendChild(li);
+  const toDataUrl = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Impossibile leggere la foto."));
+    reader.readAsDataURL(file);
   });
+
+  button.disabled = true;
+  button.textContent = "Analisi in corso…";
   result.style.display = "block";
   result.scrollIntoView({behavior:"smooth", block:"start"});
+  badge.textContent = "AI IN CORSO";
+  document.getElementById("resultTitle").textContent = "Stiamo analizzando il problema";
+  document.getElementById("resultIntro").textContent =
+    "Settore: " + selectedCategory + " · Modalità: " +
+    (selectedMode === "beginner" ? "Principiante" : "Professionista");
+  answerBox.textContent = "Attendi mentre prepariamo la risposta…";
+
+  try {
+    let imageDataUrl = "";
+    if (photo) {
+      if (photo.size > 4 * 1024 * 1024) {
+        throw new Error("La foto supera 4 MB. Scegli un'immagine più piccola.");
+      }
+      imageDataUrl = await toDataUrl(photo);
+    }
+
+    const response = await fetch("/api/diagnose", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        category: selectedCategory,
+        mode: selectedMode,
+        problem,
+        imageDataUrl
+      })
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (data.error === "AI_NOT_CONFIGURED") {
+        throw new Error("Il servizio AI non è ancora attivato sul server. Il sito è pronto per il collegamento, ma serve completare la configurazione del backend.");
+      }
+      if (response.status === 404) {
+        throw new Error("Il backend AI non è ancora pubblicato su questo sito. La pagina è ancora ospitata su GitHub Pages; per eseguire la diagnosi dobbiamo attivare il servizio server.");
+      }
+      throw new Error(data.message || "La diagnosi non è riuscita. Riprova più tardi.");
+    }
+
+    if (!data.answer) throw new Error("La risposta AI è vuota. Riprova.");
+    badge.textContent = "RISPOSTA AI";
+    document.getElementById("resultTitle").textContent = "Analisi preliminare — " + selectedCategory;
+    answerBox.textContent = data.answer;
+  } catch (error) {
+    badge.textContent = "SERVIZIO NON DISPONIBILE";
+    document.getElementById("resultTitle").textContent = "La diagnosi AI non è ancora disponibile";
+    answerBox.textContent = error.message ||
+      "Non è stato possibile collegarsi al servizio. Riprova più tardi.";
+  } finally {
+    button.disabled = false;
+    button.textContent = "Inizia la diagnosi →";
+  }
 });
 </script>
 </body>
